@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -30,13 +31,12 @@
   </div>
   <div id="root" style="display:none;"></div>
 
-  <!-- Carga Modular de Firebase con Polyfill compat y forzado de Long-Polling -->
+  <!-- Carga Modular de Firebase con Polyfill compat y Long-Polling -->
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-app.js";
     import { 
       initializeFirestore, 
-      experimentalLongPollingOptions,
-      collection, onSnapshot, getDocs, getDoc, doc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, writeBatch, serverTimestamp 
+      collection, onSnapshot, getDocs, getDoc, doc, addDoc, setDoc, updateDoc, deleteDoc, query, where, writeBatch, serverTimestamp 
     } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore.js";
 
     const firebaseConfig = {
@@ -50,17 +50,16 @@
     };
 
     const app = initializeApp(firebaseConfig);
-    // FORZAR LONG POLLING PARA EVITAR ERRORES CORS / 403 EN LOCAL FILE Y LOCALHOST
+    // FORZAR LONG POLLING PARA EVITAR BLOQUEOS EN LOCAL FILE / CORS
     const db = initializeFirestore(app, {
       experimentalForceLongPolling: true
     });
 
-    // Adaptador de compatibilidad para el código React existente
     window.dbInstance = db;
     window.fbUtils = {
       collection: (path) => collection(db, path),
       doc: (path, ...ids) => doc(db, path, ...ids),
-      onSnapshot, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, writeBatch, serverTimestamp
+      onSnapshot, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, writeBatch, serverTimestamp
     };
     window.firebaseListo = true;
     window.dispatchEvent(new Event('firebase-ready'));
@@ -73,6 +72,7 @@
     const ADMIN_PASSWORD = "admin123";
 
     function simpleHash(str) {
+      if (!str) return "";
       let hash = 0;
       for (let i = 0; i < str.length; i++) {
         hash = ((hash << 5) - hash) + str.charCodeAt(i);
@@ -80,13 +80,16 @@
       }
       return "h" + Math.abs(hash).toString(16);
     }
+
     function hoyISO() { return new Date().toISOString().slice(0, 10); }
+
     function formatearFecha(iso) {
       if (!iso) return "";
       if (iso.includes("/")) return iso;
       const p = iso.split("-");
       return p.length === 3 ? p[2] + "/" + p[1] + "/" + p[0] : iso;
     }
+
     function valeVacio() {
       return {
         fecha: hoyISO(), nombreCliente: "", telefonoCliente: "", direccion: "",
@@ -95,9 +98,11 @@
         costoMensajeria: "", imagen: ""
       };
     }
+
     function subtotalItem(it) {
       return (parseFloat(it.cantidad) || 0) * (parseFloat(it.precio) || 0);
     }
+
     function calcularTotalVale(fila) {
       const suma = (fila.items || []).reduce((a, it) => a + subtotalItem(it), 0);
       return suma + (parseFloat(fila.costoMensajeria) || 0);
@@ -129,10 +134,12 @@
         else localStorage.removeItem("app_session_user");
       }, [currentUser]);
 
+      // CARGA DE DATOS DESDE FIRESTORE
       useEffect(() => {
         if (!ready) return;
-        const { collection, onSnapshot, query, orderBy } = window.fbUtils;
+        const { collection, onSnapshot } = window.fbUtils;
         
+        // 1. Escuchar Usuarios sin filtros rígidos
         const u1 = onSnapshot(collection("users"),
           (snap) => {
             const list = [];
@@ -140,19 +147,26 @@
             setUsers(list);
             setCargando(false);
           },
-          (err) => { setErrorSync(err.message); setCargando(false); }
+          (err) => { setErrorSync("Error cargando usuarios: " + err.message); setCargando(false); }
         );
 
-        const u2 = onSnapshot(query(collection("vales"), orderBy("createdAt", "desc")),
+        // 2. Escuchar Vales en tiempo real y ordenar localmente
+        const u2 = onSnapshot(collection("vales"),
           (snap) => {
             const list = [];
             snap.forEach(d => list.push({ id: d.id, ...d.data() }));
+            list.sort((a, b) => {
+              const tA = a.createdAt?.seconds || 0;
+              const tB = b.createdAt?.seconds || 0;
+              return tB - tA;
+            });
             setVales(list);
           },
-          (err) => setErrorSync(err.message)
+          (err) => setErrorSync("Error cargando vales: " + err.message)
         );
 
-        const u3 = onSnapshot(query(collection("admin_requests"), orderBy("createdAt", "desc")),
+        // 3. Escuchar Solicitudes
+        const u3 = onSnapshot(collection("admin_requests"),
           (snap) => {
             const list = [];
             snap.forEach(d => list.push({ id: d.id, ...d.data() }));
@@ -167,72 +181,100 @@
       const handleRegister = async (formData) => {
         try {
           const { collection, query, where, getDocs, addDoc, serverTimestamp } = window.fbUtils;
-          const t = await getDocs(query(collection("users"), where("telefono", "==", formData.telefono)));
+          const tel = formData.telefono.trim();
+          const car = formData.carnet.trim();
+
+          const t = await getDocs(query(collection("users"), where("telefono", "==", tel)));
           if (!t.empty) { alert("Ya existe un gestor con ese teléfono."); return false; }
-          const c = await getDocs(query(collection("users"), where("carnet", "==", formData.carnet)));
+          
+          const c = await getDocs(query(collection("users"), where("carnet", "==", car)));
           if (!c.empty) { alert("Ya existe un gestor con ese carnet."); return false; }
+
           await addDoc(collection("users"), {
-            role: "gestor", nombre: formData.nombre, alias: formData.alias || "",
-            telefono: formData.telefono, carnet: formData.carnet, tarjeta: formData.tarjeta,
-            edad: formData.edad || "", foto: formData.foto || "",
-            passwordHash: simpleHash(formData.password),
+            role: "gestor",
+            nombre: formData.nombre.trim(),
+            alias: formData.alias ? formData.alias.trim() : "",
+            telefono: tel,
+            carnet: car,
+            tarjeta: formData.tarjeta.trim(),
+            edad: formData.edad || "",
+            foto: formData.foto || "",
+            passwordHash: simpleHash(formData.password.trim()),
             createdAt: serverTimestamp()
           });
           return true;
-        } catch (e) { alert("Error: " + e.message); return false; }
+        } catch (e) { alert("Error al registrar: " + e.message); return false; }
       };
 
       const handleLoginGestor = async (telefono, password) => {
         try {
           const { collection, query, where, getDocs } = window.fbUtils;
-          const snap = await getDocs(query(collection("users"), where("telefono", "==", telefono), where("role", "==", "gestor")));
+          const telLimpio = telefono.trim();
+          
+          const snap = await getDocs(query(collection("users"), where("telefono", "==", telLimpio)));
           if (snap.empty) { alert("Teléfono no registrado."); return false; }
+          
           const doc = snap.docs[0];
           const data = doc.data();
-          if (data.passwordHash !== simpleHash(password)) { alert("Contraseña incorrecta."); return false; }
+
+          if (data.passwordHash !== simpleHash(password.trim())) { 
+            alert("Contraseña incorrecta."); 
+            return false; 
+          }
+
           setCurrentUser({
-            id: doc.id, nombre: data.nombre, alias: data.alias || "", telefono: data.telefono,
-            carnet: data.carnet, tarjeta: data.tarjeta, edad: data.edad, foto: data.foto || "", role: "gestor"
+            id: doc.id, 
+            nombre: data.nombre, 
+            alias: data.alias || "", 
+            telefono: data.telefono,
+            carnet: data.carnet, 
+            tarjeta: data.tarjeta, 
+            edad: data.edad, 
+            foto: data.foto || "", 
+            role: (data.role || "gestor").toString().trim().toLowerCase()
           });
           return true;
-        } catch (e) { alert("Error: " + e.message); return false; }
+        } catch (e) { alert("Error al iniciar sesión: " + e.message); return false; }
       };
 
       const handleLoginAdmin = async (identificador, password) => {
-        if (password === ADMIN_PASSWORD && (!identificador || identificador === "admin")) {
+        const passClean = password.trim();
+        const idClean = identificador ? identificador.trim() : "";
+
+        if (passClean === ADMIN_PASSWORD && (!idClean || idClean === "admin")) {
           setCurrentUser({ id: "admin", nombre: "Administrador Principal", role: "admin", isPrincipal: true });
           return { ok: true };
         }
         try {
           const { collection, query, where, getDocs } = window.fbUtils;
-          let snap = await getDocs(query(collection("admin_requests"), where("telefono", "==", identificador), where("estado", "==", "aceptado")));
-          if (snap.empty) snap = await getDocs(query(collection("admin_requests"), where("carnet", "==", identificador), where("estado", "==", "aceptado")));
+          let snap = await getDocs(query(collection("admin_requests"), where("telefono", "==", idClean), where("estado", "==", "aceptado")));
+          if (snap.empty) snap = await getDocs(query(collection("admin_requests"), where("carnet", "==", idClean), where("estado", "==", "aceptado")));
+          
           if (!snap.empty) {
             const data = snap.docs[0].data();
-            if (data.passwordHash !== simpleHash(password)) return { ok: false, msg: "Contraseña incorrecta." };
+            if (data.passwordHash !== simpleHash(passClean)) return { ok: false, msg: "Contraseña incorrecta." };
             setCurrentUser({
               id: snap.docs[0].id, nombre: data.nombre, alias: data.alias || "", carnet: data.carnet,
               telefono: data.telefono, role: "admin", isPrincipal: false, foto: data.foto || ""
             });
             return { ok: true };
           }
-          let pend = await getDocs(query(collection("admin_requests"), where("telefono", "==", identificador), where("estado", "==", "pendiente")));
-          if (pend.empty) pend = await getDocs(query(collection("admin_requests"), where("carnet", "==", identificador), where("estado", "==", "pendiente")));
-          if (!pend.empty) return { ok: false, msg: "Tu solicitud está siendo procesada." };
-          return { ok: false, msg: "Credenciales no válidas." };
+          return { ok: false, msg: "Credenciales de administrador no válidas." };
         } catch (e) { return { ok: false, msg: e.message }; }
       };
 
       const handleRequestAdmin = async (formData) => {
         try {
           const { collection, query, where, getDocs, addDoc, serverTimestamp } = window.fbUtils;
-          const q = await getDocs(query(collection("admin_requests"), where("telefono", "==", formData.telefono)));
+          const tel = formData.telefono.trim();
+
+          const q = await getDocs(query(collection("admin_requests"), where("telefono", "==", tel)));
           if (q.docs.some(d => ["pendiente","aceptado"].includes(d.data().estado))) {
-            alert("Ya hay una solicitud con ese teléfono."); return false;
+            alert("Ya existe una solicitud con este teléfono."); return false;
           }
           await addDoc(collection("admin_requests"), {
-            nombre: formData.nombre, alias: formData.alias || "", telefono: formData.telefono,
-            carnet: formData.carnet, passwordHash: simpleHash(formData.password), foto: formData.foto || "",
+            nombre: formData.nombre.trim(), alias: formData.alias || "", telefono: tel,
+            carnet: formData.carnet.trim(), passwordHash: simpleHash(formData.password.trim()), foto: formData.foto || "",
             estado: "pendiente", fecha: new Date().toLocaleDateString("es-ES"),
             createdAt: serverTimestamp()
           });
@@ -321,13 +363,13 @@
       };
 
       const handleDeleteGestor = async (gestorId, gestorNombre) => {
-        const n = vales.filter(v => v.gestorId === gestorId).length;
+        const n = vales.filter(v => String(v.gestorId).trim() === String(gestorId).trim()).length;
         if (!confirm(n > 0 ? '¿Eliminar gestor "' + gestorNombre + '" y sus ' + n + ' vales?' : '¿Eliminar gestor "' + gestorNombre + '"?')) return;
         try {
           const { writeBatch, doc, dbInstance } = window.fbUtils;
           const batch = writeBatch(dbInstance);
           batch.delete(doc("users", gestorId));
-          vales.filter(v => v.gestorId === gestorId).forEach(v => batch.delete(doc("vales", v.id)));
+          vales.filter(v => String(v.gestorId).trim() === String(gestorId).trim()).forEach(v => batch.delete(doc("vales", v.id)));
           await batch.commit();
         } catch (e) { alert("Error: " + e.message); }
       };
@@ -335,7 +377,7 @@
       if (cargando || !ready) {
         return (
           <div className="min-h-screen flex items-center justify-center">
-            <p className="text-sm text-slate-600">Sincronizando datos...</p>
+            <p className="text-sm text-slate-600">Sincronizando datos con Firebase...</p>
           </div>
         );
       }
@@ -348,6 +390,9 @@
           />
         );
       }
+
+      // Filtrado flexible de lista de gestores
+      const listaGestores = users.filter(u => !u.role || u.role.toString().trim().toLowerCase() === "gestor");
 
       return (
         <div className="min-h-screen flex flex-col">
@@ -368,7 +413,7 @@
           <main className="flex-grow p-4 max-w-4xl mx-auto w-full">
             {currentUser.role === "admin" ? (
               <AdminDashboard
-                users={users.filter(u => u.role === "gestor")} vales={vales}
+                users={listaGestores} vales={vales}
                 adminTab={adminTab} setAdminTab={setAdminTab}
                 onToggleEstado={handleToggleValeEstado} onDeleteVale={handleDeleteVale}
                 onDeleteGestor={handleDeleteGestor} adminRequests={adminRequests}
@@ -377,7 +422,7 @@
             ) : (
               <GestorDashboard
                 user={currentUser}
-                vales={vales.filter(v => v.gestorId === currentUser.id)}
+                vales={vales.filter(v => String(v.gestorId).trim() === String(currentUser.id).trim())}
                 onAddVales={handleAddVales}
               />
             )}
@@ -416,7 +461,7 @@
               {mode === "admin" && "Acceso Administrador"}
               {mode === "requestAdmin" && "Solicitar ser Administrador"}
             </h2>
-            <p className="text-center text-xs text-emerald-600 mb-4">● Multi-dispositivo · Datos en la nube</p>
+            <p className="text-center text-xs text-emerald-600 mb-4">● Sincronización en directo</p>
             {errorSync && <div className="mb-3 p-2 bg-red-50 text-red-700 text-xs rounded">{errorSync}</div>}
             {error && <div className="mb-3 p-2 bg-red-50 text-red-700 text-xs rounded">{error}</div>}
             {info && <div className="mb-3 p-2 bg-emerald-50 text-emerald-800 text-xs rounded">{info}</div>}
@@ -426,7 +471,7 @@
                 <form onSubmit={async (e) => {
                   e.preventDefault(); setError(""); setBusy(true);
                   if (!loginTel || !loginPass) { setError("Completa los campos."); setBusy(false); return; }
-                  const ok = await onLoginGestor(loginTel.trim(), loginPass);
+                  const ok = await onLoginGestor(loginTel, loginPass);
                   if (!ok) setError("Credenciales incorrectas.");
                   setBusy(false);
                 }} className="space-y-3">
@@ -455,14 +500,14 @@
             {mode === "admin" && (
               <form onSubmit={async (e) => {
                 e.preventDefault(); setError(""); setBusy(true);
-                const r = await onLoginAdmin(adminId.trim(), adminPass);
-                if (!r.ok) setError(r.msg || "Error");
+                const r = await onLoginAdmin(adminId, adminPass);
+                if (!r.ok) setError(r.msg || "Error de credenciales");
                 setBusy(false);
               }} className="space-y-3">
-                <p className="text-xs bg-slate-50 p-2 rounded">Admin principal: identificación vacía + contraseña del sistema.</p>
+                <p className="text-xs bg-slate-50 p-2 rounded text-slate-600">Admin principal: Identificación vacía + contraseña asignada.</p>
                 <div>
-                  <label className="block text-xs font-semibold mb-1">Teléfono o Carnet (secundarios)</label>
-                  <input type="text" className="w-full border p-2 rounded" value={adminId} onChange={e => setAdminId(e.target.value)} placeholder="Vacío = Admin Principal" />
+                  <label className="block text-xs font-semibold mb-1">Teléfono o Carnet (Secundarios)</label>
+                  <input type="text" className="w-full border p-2 rounded" value={adminId} onChange={e => setAdminId(e.target.value)} placeholder="Dejar vacío para Admin Principal" />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold mb-1">Contraseña *</label>
@@ -484,7 +529,7 @@
                 if (reqForm.password !== reqForm.password2) { setError("Contraseñas no coinciden."); setBusy(false); return; }
                 const ok = await onRequestAdmin(reqForm);
                 if (ok) {
-                  setInfo("Solicitud enviada. Espera la aprobación del admin principal.");
+                  setInfo("Solicitud enviada correctamente.");
                   setReqForm({ nombre: "", alias: "", telefono: "", carnet: "", password: "", password2: "", foto: "" });
                 }
                 setBusy(false);
@@ -499,7 +544,7 @@
                   <input type="text" required className="w-full border p-2 rounded" value={reqForm.carnet} onChange={e => setReqForm({...reqForm, carnet: e.target.value})} /></div>
                 <div><label className="block text-xs font-semibold mb-1">Contraseña *</label>
                   <input type="password" required className="w-full border p-2 rounded" value={reqForm.password} onChange={e => setReqForm({...reqForm, password: e.target.value})} /></div>
-                <div><label className="block text-xs font-semibold mb-1">Confirmar *</label>
+                <div><label className="block text-xs font-semibold mb-1">Confirmar Contraseña *</label>
                   <input type="password" required className="w-full border p-2 rounded" value={reqForm.password2} onChange={e => setReqForm({...reqForm, password2: e.target.value})} /></div>
                 <div className="flex gap-2">
                   <button type="button" onClick={() => setMode("login")} className="w-1/2 border py-2 rounded">Volver</button>
@@ -517,7 +562,7 @@
                 if (form.password !== form.password2) { setError("Contraseñas no coinciden."); setBusy(false); return; }
                 const ok = await onRegister(form);
                 if (ok) {
-                  alert("Registro exitoso. Ahora inicia sesión.");
+                  alert("Gestor registrado exitosamente. Ya puedes iniciar sesión.");
                   setMode("login");
                   setForm({ nombre: "", alias: "", telefono: "", carnet: "", tarjeta: "", edad: "", password: "", password2: "", foto: "" });
                 }
@@ -537,7 +582,7 @@
                   <input type="password" required className="w-full border p-2 rounded" value={form.password} onChange={e => setForm({...form, password: e.target.value})} /></div>
                 <div><label className="block text-xs font-semibold mb-1">Confirmar *</label>
                   <input type="password" required className="w-full border p-2 rounded" value={form.password2} onChange={e => setForm({...form, password2: e.target.value})} /></div>
-                <div><label className="block text-xs font-semibold mb-1">Foto (opcional)</label>
+                <div><label className="block text-xs font-semibold mb-1">Foto (Opcional)</label>
                   <input type="file" accept="image/*" className="w-full text-xs" onChange={e => handleImageChange(e, setForm, form)} /></div>
                 <div className="flex gap-2">
                   <button type="button" onClick={() => setMode("login")} className="w-1/2 border py-2 rounded">Volver</button>
@@ -564,6 +609,7 @@
           return nuevas.slice(0, num);
         });
       };
+
       const updateFila = (i, c, v) => setFilas(prev => { const cpy = [...prev]; cpy[i] = { ...cpy[i], [c]: v }; return cpy; });
       const updateItem = (fi, ii, c, v) => setFilas(prev => {
         const cpy = [...prev]; const items = [...(cpy[fi].items || [])];
@@ -632,7 +678,7 @@
                     <input type="text" required className="w-full border p-2 rounded text-sm" value={fila.direccion} onChange={e => updateFila(idx, "direccion", e.target.value)} /></div>
                   <div><label className="block text-xs font-semibold mb-1">MUNICIPIO *</label>
                     <input type="text" required className="w-full border p-2 rounded text-sm" value={fila.municipio} onChange={e => updateFila(idx, "municipio", e.target.value)} /></div>
-                  <div><label className="block text-xs font-semibold mb-1">📌 PUNTO DE REFERENCIA (opcional)</label>
+                  <div><label className="block text-xs font-semibold mb-1">📌 PUNTO DE REFERENCIA (Opcional)</label>
                     <input type="text" className="w-full border p-2 rounded text-sm" value={fila.puntoReferencia} onChange={e => updateFila(idx, "puntoReferencia", e.target.value)} /></div>
 
                   <div>
@@ -640,13 +686,11 @@
                     {(fila.items || []).map((item, itemIdx) => (
                       <div key={itemIdx} className="flex flex-wrap gap-2 mb-2 items-center">
                         <input type="text" className="flex-grow min-w-[100px] border p-2 rounded text-sm" placeholder="Producto"
-                          value={item.nombre} onChange={e => updateItem(idx, itemIdx, "nombre", e.target.value)}
-                          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addItem(idx); } }} />
+                          value={item.nombre} onChange={e => updateItem(idx, itemIdx, "nombre", e.target.value)} />
                         <input type="number" min="1" className="w-16 border p-2 rounded text-sm text-center" placeholder="Cant"
                           value={item.cantidad} onChange={e => updateItem(idx, itemIdx, "cantidad", e.target.value)} />
                         <input type="number" step="0.01" className="w-24 border p-2 rounded text-sm" placeholder="$"
-                          value={item.precio} onChange={e => updateItem(idx, itemIdx, "precio", e.target.value)}
-                          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addItem(idx); } }} />
+                          value={item.precio} onChange={e => updateItem(idx, itemIdx, "precio", e.target.value)} />
                         <span className="text-xs w-16 text-center">${subtotalItem(item).toFixed(2)}</span>
                         <button type="button" onClick={() => addItem(idx)} className="w-8 h-8 bg-emerald-100 text-emerald-700 rounded font-bold">+</button>
                         <button type="button" onClick={() => removeItem(idx, itemIdx)} className="w-8 h-8 bg-red-100 text-red-600 rounded font-bold">−</button>
@@ -661,7 +705,7 @@
                     <div><label className="block text-xs font-semibold mb-1">💰 TOTAL</label>
                       <div className="border p-2 rounded text-sm font-bold bg-emerald-50 text-emerald-800">${calcularTotalVale(fila).toFixed(2)}</div></div>
                   </div>
-                  <div className="bg-indigo-50 p-2 rounded text-xs">
+                  <div className="bg-indigo-50 p-2 rounded text-xs text-indigo-900">
                     👤 {user.nombre} · 📲 {user.telefono}
                   </div>
                 </div>
@@ -675,18 +719,18 @@
 
           <div className="grid grid-cols-2 gap-4">
             <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg text-center">
-              <span className="text-xs text-amber-700 block">Pendiente</span>
+              <span className="text-xs text-amber-700 block">Comisión Pendiente</span>
               <span className="text-lg font-bold text-amber-800">${totalPendiente.toFixed(2)}</span>
             </div>
             <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-lg text-center">
-              <span className="text-xs text-emerald-700 block">Cobrado</span>
+              <span className="text-xs text-emerald-700 block">Comisión Cobrada</span>
               <span className="text-lg font-bold text-emerald-800">${totalPagado.toFixed(2)}</span>
             </div>
           </div>
 
           <div className="bg-white p-4 rounded-xl border">
             <h4 className="font-bold mb-3">Mis Vales</h4>
-            {vales.length === 0 ? <p className="text-xs text-slate-400 text-center py-4">Ninguno aún</p> : (
+            {vales.length === 0 ? <p className="text-xs text-slate-400 text-center py-4">Sin vales registrados</p> : (
               <div className="space-y-2">
                 {vales.map(v => (
                   <div key={v.id} className="border p-3 rounded-lg text-xs flex justify-between">
@@ -728,30 +772,36 @@
 
           {adminTab === "gestores" && (
             <div className="space-y-4">
-              {users.length === 0 ? <p className="text-xs text-slate-400 text-center py-6">Sin gestores</p> : users.map(u => {
-                const vg = vales.filter(v => v.gestorId === u.id);
-                const pend = vg.filter(v => v.estado === "pendiente").reduce((a, v) => a + (v.comisionMonto || 0), 0);
+              {users.length === 0 ? <p className="text-xs text-slate-400 text-center py-6">No hay gestores registrados</p> : users.map(u => {
+                const vg = vales.filter(v => String(v.gestorId).trim() === String(u.id).trim());
+                const pend = vg.filter(v => v.estado === "pendiente").reduce((a, v) => a + (parseFloat(v.comisionMonto) || 0), 0);
                 return (
                   <div key={u.id} className="bg-white p-4 rounded-xl border">
                     <div className="flex justify-between">
                       <div>
-                        <h4 className="font-bold">{u.nombre}{u.alias ? " (" + u.alias + ")" : ""}</h4>
+                        <h4 className="font-bold text-slate-900">{u.nombre}{u.alias ? " (" + u.alias + ")" : ""}</h4>
                         <p className="text-xs text-slate-500">Tel: {u.telefono} · Carnet: {u.carnet}</p>
-                        <p className="text-xs">Tarjeta: {u.tarjeta}</p>
+                        <p className="text-xs text-slate-600">Tarjeta: {u.tarjeta || "N/A"}</p>
                       </div>
                       <div className="text-right">
                         <p className="text-amber-600 font-bold">${pend.toFixed(2)}</p>
                         <button onClick={() => onDeleteGestor(u.id, u.nombre)} className="text-[10px] text-red-600 border border-red-300 px-2 py-1 rounded mt-1">Eliminar</button>
                       </div>
                     </div>
-                    {vg.map(v => (
-                      <div key={v.id} className="mt-2 bg-slate-50 p-2 rounded text-xs flex justify-between">
-                        <span>{v.nombreCliente} · ${Number(v.totalPagar || 0).toFixed(2)}</span>
-                        <button onClick={() => onToggleEstado(v.id, v.estado)} className={"px-2 py-1 rounded text-[10px] font-bold " + (v.estado === "pagado" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
-                          {v.estado === "pagado" ? "PAGADO" : "MARCAR PAGADO"}
-                        </button>
+                    {vg.length > 0 ? (
+                      <div className="mt-3 space-y-1 border-t pt-2">
+                        {vg.map(v => (
+                          <div key={v.id} className="bg-slate-50 p-2 rounded text-xs flex justify-between items-center">
+                            <span>{v.nombreCliente} · Total: ${Number(v.totalPagar || 0).toFixed(2)}</span>
+                            <button onClick={() => onToggleEstado(v.id, v.estado)} className={"px-2 py-1 rounded text-[10px] font-bold " + (v.estado === "pagado" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
+                              {v.estado === "pagado" ? "PAGADO" : "MARCAR PAGADO"}
+                            </button>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    ) : (
+                      <p className="text-[10px] text-slate-400 mt-2 italic">Sin vales asignados</p>
+                    )}
                   </div>
                 );
               })}
@@ -760,12 +810,12 @@
 
           {adminTab === "vales" && (
             <div className="space-y-3">
-              {vales.map(v => (
+              {vales.length === 0 ? <p className="text-xs text-slate-400 text-center py-6">Sin vales en el sistema</p> : vales.map(v => (
                 <div key={v.id} className="bg-white rounded-xl border overflow-hidden">
                   <div className="p-3 flex justify-between text-xs cursor-pointer" onClick={() => setValeExpandido(valeExpandido === v.id ? null : v.id)}>
                     <div>
-                      <p className="font-bold">{v.nombreCliente} · {v.municipio}</p>
-                      <p>Gestor: {v.gestorNombre}</p>
+                      <p className="font-bold text-slate-800">{v.nombreCliente} · {v.municipio}</p>
+                      <p className="text-slate-500">Gestor: {v.gestorNombre || "Desconocido"}</p>
                       <p className="text-indigo-600 font-semibold">${Number(v.totalPagar || 0).toFixed(2)}</p>
                     </div>
                     <div className="flex flex-col gap-1 items-end" onClick={e => e.stopPropagation()}>
@@ -780,7 +830,7 @@
                       <p>🗓️ {formatearFecha(v.fecha)} · 📱 {v.telefonoCliente}</p>
                       <p>📍 {v.direccion} · {v.municipio}</p>
                       {(v.items || []).map((it, i) => <p key={i}>• {it.nombre} x{it.cantidad} ${Number(it.precio).toFixed(2)}</p>)}
-                      <p>🛵 ${Number(v.costoMensajeria || 0).toFixed(2)} · 💰 ${Number(v.totalPagar || 0).toFixed(2)}</p>
+                      <p className="font-bold text-emerald-700 mt-1">🛵 ${Number(v.costoMensajeria || 0).toFixed(2)} · Total: ${Number(v.totalPagar || 0).toFixed(2)}</p>
                     </div>
                   )}
                 </div>
@@ -815,9 +865,8 @@
       ReactDOM.createRoot(rootEl).render(<App />);
     } catch (err) {
       const load = document.getElementById("loading");
-      if (load) load.innerHTML = "<p style='color:#991b1b'>Error: " + (err.message || err) + "</p>";
+      if (load) load.innerHTML = "<p style='color:#991b1b'>Error de renderizado: " + (err.message || err) + "</p>";
     }
   </script>
 </body>
 </html>
-
