@@ -1,0 +1,1191 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sistema de Gestión de Vales y Gestores</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 font-sans antialiased">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    // =====================================================
+    // CONFIGURACIÓN - CAMBIA ESTOS VALORES
+    // =====================================================
+    const ADMIN_WHATSAPP = "5355360008";   // WhatsApp del admin principal (55360008)
+    const ADMIN_PASSWORD = "admin123";     // Contraseña del ADMIN PRINCIPAL (original)
+    // =====================================================
+
+    function simpleHash(str) {
+      let hash = 0;
+      for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash;
+      }
+      return "h" + Math.abs(hash).toString(16);
+    }
+
+    function hoyISO() {
+      const d = new Date();
+      return d.toISOString().slice(0, 10);
+    }
+
+    function formatearFecha(iso) {
+      if (!iso) return '';
+      const [y, m, d] = iso.split('-');
+      return `${d}/${m}/${y}`;
+    }
+
+    // Plantilla vacía de un vale
+    function valeVacio() {
+      return {
+        fecha: hoyISO(),
+        nombreCliente: '',
+        telefonoCliente: '',
+        direccion: '',
+        municipio: '',
+        puntoReferencia: '',
+        items: [{ nombre: '', cantidad: '1', precio: '' }],
+        costoMensajeria: '',
+        imagen: ''
+      };
+    }
+
+    // Subtotal de un producto (cantidad × precio unitario)
+    function subtotalItem(it) {
+      const c = parseFloat(it.cantidad) || 0;
+      const p = parseFloat(it.precio) || 0;
+      return c * p;
+    }
+
+    // Suma productos + mensajería
+    function calcularTotalVale(fila) {
+      const sumaProductos = (fila.items || []).reduce((acc, it) => acc + subtotalItem(it), 0);
+      const mensajeria = parseFloat(fila.costoMensajeria) || 0;
+      return sumaProductos + mensajeria;
+    }
+
+
+
+    function App() {
+      const [currentUser, setCurrentUser] = useState(() => {
+        const saved = localStorage.getItem("app_current_user");
+        return saved ? JSON.parse(saved) : null;
+      });
+      const [users, setUsers] = useState(() => {
+        const saved = localStorage.getItem("app_users");
+        return saved ? JSON.parse(saved) : [];
+      });
+      const [vales, setVales] = useState(() => {
+        const saved = localStorage.getItem("app_vales");
+        return saved ? JSON.parse(saved) : [];
+      });
+      const [adminRequests, setAdminRequests] = useState(() => {
+        const saved = localStorage.getItem("app_admin_requests");
+        return saved ? JSON.parse(saved) : [];
+      });
+      const [adminTab, setAdminTab] = useState('gestores');
+
+      useEffect(() => { localStorage.setItem("app_current_user", JSON.stringify(currentUser)); }, [currentUser]);
+      useEffect(() => { localStorage.setItem("app_users", JSON.stringify(users)); }, [users]);
+      useEffect(() => { localStorage.setItem("app_vales", JSON.stringify(vales)); }, [vales]);
+      useEffect(() => { localStorage.setItem("app_admin_requests", JSON.stringify(adminRequests)); }, [adminRequests]);
+
+      const handleRegister = (formData) => {
+        if (users.some(u => u.telefono === formData.telefono)) { alert("Ya existe un gestor con ese teléfono."); return false; }
+        if (users.some(u => u.carnet === formData.carnet)) { alert("Ya existe un gestor con ese carnet."); return false; }
+        if (formData.alias && users.some(u => u.alias && u.alias.toLowerCase() === formData.alias.toLowerCase())) {
+          alert("Ese alias ya está en uso."); return false;
+        }
+        setUsers([...users, {
+          id: Date.now().toString(), role: 'gestor',
+          nombre: formData.nombre, alias: formData.alias || '',
+          telefono: formData.telefono, carnet: formData.carnet,
+          tarjeta: formData.tarjeta, edad: formData.edad, foto: formData.foto,
+          passwordHash: simpleHash(formData.password)
+        }]);
+        return true;
+      };
+
+      const handleLoginGestor = (telefono, password) => {
+        const user = users.find(u => u.telefono === telefono && u.role === 'gestor');
+        if (!user) { alert("Teléfono no registrado."); return false; }
+        if (user.passwordHash !== simpleHash(password)) { alert("Contraseña incorrecta."); return false; }
+        const { passwordHash, ...safeUser } = user;
+        setCurrentUser(safeUser);
+        return true;
+      };
+
+      const handleLoginAdmin = (identificador, password) => {
+        if (password === ADMIN_PASSWORD && (identificador === '' || identificador === 'admin')) {
+          setCurrentUser({ id: 'admin', nombre: 'Administrador Principal', role: 'admin', isPrincipal: true });
+          return { ok: true };
+        }
+        const req = adminRequests.find(r =>
+          (r.telefono === identificador || r.carnet === identificador) && r.estado === 'aceptado'
+        );
+        if (req) {
+          if (req.passwordHash !== simpleHash(password)) return { ok: false, msg: 'Contraseña incorrecta.' };
+          setCurrentUser({
+            id: req.id, nombre: req.nombre, alias: req.alias || '',
+            carnet: req.carnet, telefono: req.telefono, role: 'admin',
+            isPrincipal: false, foto: req.foto || ''
+          });
+          return { ok: true };
+        }
+        const pendiente = adminRequests.find(r =>
+          (r.telefono === identificador || r.carnet === identificador) && r.estado === 'pendiente'
+        );
+        if (pendiente) return { ok: false, msg: 'Tu solicitud de administrador está siendo procesada. Espera a que el administrador principal la revise.' };
+        const rechazada = adminRequests.find(r =>
+          (r.telefono === identificador || r.carnet === identificador) && r.estado === 'rechazado'
+        );
+        if (rechazada) return { ok: false, msg: 'Tu solicitud de administrador fue rechazada. Contacta al administrador principal.' };
+        return { ok: false, msg: 'Credenciales de administrador no válidas.' };
+      };
+
+      const handleRequestAdmin = (formData) => {
+        const yaExiste = adminRequests.some(r =>
+          (r.telefono === formData.telefono || r.carnet === formData.carnet) &&
+          (r.estado === 'pendiente' || r.estado === 'aceptado')
+        );
+        if (yaExiste) { alert("Ya existe una solicitud (pendiente o aceptada) con ese teléfono o carnet."); return false; }
+        setAdminRequests([{
+          id: Date.now().toString(),
+          nombre: formData.nombre, alias: formData.alias || '',
+          telefono: formData.telefono, carnet: formData.carnet,
+          passwordHash: simpleHash(formData.password), foto: formData.foto || '',
+          estado: 'pendiente', fecha: new Date().toLocaleDateString('es-ES')
+        }, ...adminRequests]);
+        return true;
+      };
+
+      const handleResolverSolicitud = (requestId, decision) => {
+        setAdminRequests(adminRequests.map(r => r.id === requestId ? { ...r, estado: decision } : r));
+      };
+
+      const handleLogout = () => setCurrentUser(null);
+
+      // --- SUBIR VALES (formato completo) ---
+      const handleAddVales = (listaVales) => {
+        const nuevos = listaVales.map((item, idx) => {
+          const itemsLimpios = (item.items || [])
+            .filter(it => it.nombre && it.nombre.trim())
+            .map(it => ({
+              nombre: it.nombre.trim(),
+              cantidad: parseFloat(it.cantidad) || 1,
+              precio: parseFloat(it.precio) || 0
+            }));
+          const sumaProductos = itemsLimpios.reduce((a, it) => a + (it.cantidad * it.precio), 0);
+          const costoMensajeria = parseFloat(item.costoMensajeria) || 0;
+          const totalNum = sumaProductos + costoMensajeria;
+          const comisionPorcentaje = totalNum >= 10000 ? 15 : 10;
+          const comisionMonto = (totalNum * comisionPorcentaje) / 100;
+          const productosTexto = itemsLimpios
+            .map(it => `${it.nombre} x${it.cantidad} ($${it.precio.toFixed(2)} c/u = $${(it.cantidad * it.precio).toFixed(2)})`)
+            .join(', ');
+
+
+          return {
+            id: (Date.now() + idx).toString(),
+            gestorId: currentUser.id,
+            gestorNombre: currentUser.nombre,
+            gestorAlias: currentUser.alias || '',
+            gestorTelefono: currentUser.telefono,
+            fecha: item.fecha,
+            nombreCliente: item.nombreCliente,
+            telefonoCliente: item.telefonoCliente,
+            direccion: item.direccion,
+            municipio: item.municipio,
+            puntoReferencia: item.puntoReferencia || '',
+            items: itemsLimpios,
+            productos: productosTexto,
+            costoMensajeria,
+            totalPagar: totalNum,
+            monto: totalNum,
+            comisionPorcentaje,
+            comisionMonto,
+            imagen: item.imagen || '',
+            estado: 'pendiente',
+            fechaRegistro: new Date().toLocaleDateString('es-ES')
+          };
+        });
+
+        setVales([...nuevos, ...vales]);
+
+        // Mensaje WhatsApp con formato de ficha
+        const bloques = nuevos.map((v, i) => {
+          const n = nuevos.length > 1 ? ` (#${i + 1})` : '';
+          const listaProd = (v.items || []).map(it => {
+            const sub = (it.cantidad || 1) * (it.precio || 0);
+            return `   • ${it.nombre} x${it.cantidad || 1} — $${Number(it.precio).toFixed(2)} c/u = $${sub.toFixed(2)}`;
+          }).join('\n');
+
+          return (
+            `VALE DE VENTAS ✨${n}\n` +
+            `🗓️ FECHA: ${formatearFecha(v.fecha)}\n` +
+            `📝 NOMBRE DEL CLIENTE: ${v.nombreCliente}\n` +
+            `📱 TELÉFONO: ${v.telefonoCliente}\n` +
+            `📍 DIRECCIÓN: ${v.direccion}\n` +
+            `      MUNICIPIO: ${v.municipio}\n` +
+            (v.puntoReferencia ? `📌 PUNTO DE REFERENCIA: ${v.puntoReferencia}\n` : '') +
+            `♦️ PRODUCTOS A COMPRAR:\n${listaProd || '   —'}\n` +
+            `🛵 COSTO DE LA MENSAJERÍA: $${v.costoMensajeria.toFixed(2)}\n` +
+            `💰 TOTAL A PAGAR: $${v.totalPagar.toFixed(2)}\n` +
+            `👤 GESTOR: ${v.gestorNombre}${v.gestorAlias ? ' (' + v.gestorAlias + ')' : ''}\n` +
+            `📲 NÚMERO DEL GESTOR: ${v.gestorTelefono}\n` +
+            `💵 Comisión estimada (${v.comisionPorcentaje}%): $${v.comisionMonto.toFixed(2)}`
+          );
+        }).join('\n\n──────────────\n\n');
+
+        const mensaje = encodeURIComponent(bloques);
+        window.open(`https://wa.me/${ADMIN_WHATSAPP}?text=${mensaje}`, '_blank');
+      };
+
+
+      const handleToggleValeEstado = (valeId) => {
+        setVales(vales.map(v => v.id === valeId ? { ...v, estado: v.estado === 'pendiente' ? 'pagado' : 'pendiente' } : v));
+      };
+
+      const handleDeleteVale = (valeId) => {
+        if (confirm("¿Seguro que deseas eliminar este vale?")) {
+          setVales(vales.filter(v => v.id !== valeId));
+        }
+      };
+
+      const handleDeleteGestor = (gestorId, gestorNombre) => {
+        const n = vales.filter(v => v.gestorId === gestorId).length;
+        const msg = n > 0
+          ? `¿Eliminar al gestor "${gestorNombre}"?\n\nTambién se eliminarán sus ${n} vale(s).`
+          : `¿Eliminar al gestor "${gestorNombre}"?`;
+        if (confirm(msg)) {
+          setUsers(users.filter(u => u.id !== gestorId));
+          setVales(vales.filter(v => v.gestorId !== gestorId));
+        }
+      };
+
+      if (!currentUser) {
+        return (
+          <LoginScreen
+            onRegister={handleRegister}
+            onLoginGestor={handleLoginGestor}
+            onLoginAdmin={handleLoginAdmin}
+            onRequestAdmin={handleRequestAdmin}
+          />
+        );
+      }
+
+      if (currentUser.role !== 'admin' && currentUser.role !== 'gestor') {
+        setCurrentUser(null);
+        return null;
+      }
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          <header className="bg-indigo-700 text-white p-4 shadow-md flex justify-between items-center">
+            <div>
+              <h1 className="font-bold text-xl">Gestión de Vales</h1>
+              <p className="text-xs text-indigo-200">
+                Sesión: <span className="font-semibold">{currentUser.nombre}</span>
+                {currentUser.alias ? ` (${currentUser.alias})` : ''}
+                {' · '}
+                {currentUser.role === 'admin'
+                  ? (currentUser.isPrincipal ? 'Admin Principal' : 'Administrador')
+                  : 'Gestor'}
+              </p>
+            </div>
+            <button onClick={handleLogout} className="bg-indigo-900 hover:bg-indigo-800 text-xs px-3 py-2 rounded text-white font-medium">
+              Cerrar Sesión
+            </button>
+          </header>
+
+          <main className="flex-grow p-4 max-w-4xl mx-auto w-full">
+            {currentUser.role === 'admin' ? (
+              <AdminDashboard
+                users={users.filter(u => u.role === 'gestor')}
+                vales={vales}
+                adminTab={adminTab}
+                setAdminTab={setAdminTab}
+                onToggleEstado={handleToggleValeEstado}
+                onDeleteVale={handleDeleteVale}
+                onDeleteGestor={handleDeleteGestor}
+                adminRequests={adminRequests}
+                onResolverSolicitud={handleResolverSolicitud}
+                isPrincipal={!!currentUser.isPrincipal}
+              />
+            ) : (
+              <GestorDashboard
+                user={currentUser}
+                vales={vales.filter(v => v.gestorId === currentUser.id)}
+                onAddVales={handleAddVales}
+              />
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    // =====================================================
+    // LOGIN / REGISTRO / SOLICITUD ADMIN
+    // =====================================================
+    function LoginScreen({ onRegister, onLoginGestor, onLoginAdmin, onRequestAdmin }) {
+      const [mode, setMode] = useState('login');
+      const [error, setError] = useState('');
+      const [info, setInfo] = useState('');
+      const [loginTel, setLoginTel] = useState('');
+      const [loginPass, setLoginPass] = useState('');
+      const [adminId, setAdminId] = useState('');
+      const [adminPass, setAdminPass] = useState('');
+      const [form, setForm] = useState({
+        nombre: '', alias: '', telefono: '', carnet: '', tarjeta: '', edad: '', password: '', password2: '', foto: ''
+      });
+      const [reqForm, setReqForm] = useState({
+        nombre: '', alias: '', telefono: '', carnet: '', password: '', password2: '', foto: ''
+      });
+
+      const handleImageChange = (e, setter, current) => {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onloadend = () => setter({ ...current, foto: reader.result });
+          reader.readAsDataURL(file);
+        }
+      };
+
+      const handleLoginGestorSubmit = (e) => {
+        e.preventDefault(); setError(''); setInfo('');
+        if (!loginTel || !loginPass) { setError('Completa teléfono y contraseña.'); return; }
+        if (!onLoginGestor(loginTel.trim(), loginPass)) setError('Credenciales incorrectas.');
+      };
+
+      const handleLoginAdminSubmit = (e) => {
+        e.preventDefault(); setError(''); setInfo('');
+        if (!adminPass) { setError('Ingresa la contraseña.'); return; }
+        const result = onLoginAdmin(adminId.trim(), adminPass);
+        if (!result.ok) setError(result.msg || 'No se pudo iniciar sesión.');
+      };
+
+      const handleRegisterSubmit = (e) => {
+        e.preventDefault(); setError(''); setInfo('');
+        if (!form.nombre || !form.telefono || !form.carnet || !form.tarjeta || !form.password) {
+          setError('Todos los campos con * son obligatorios.'); return;
+        }
+        if (form.password.length < 4) { setError('La contraseña debe tener al menos 4 caracteres.'); return; }
+        if (form.password !== form.password2) { setError('Las contraseñas no coinciden.'); return; }
+        if (onRegister(form)) {
+          alert('Registro exitoso. Ahora inicia sesión con tu teléfono y contraseña.');
+          setMode('login');
+          setForm({ nombre: '', alias: '', telefono: '', carnet: '', tarjeta: '', edad: '', password: '', password2: '', foto: '' });
+        }
+      };
+
+      const handleRequestAdminSubmit = (e) => {
+        e.preventDefault(); setError(''); setInfo('');
+        if (!reqForm.nombre || !reqForm.telefono || !reqForm.carnet || !reqForm.password) {
+          setError('Nombre, teléfono, carnet y contraseña son obligatorios.'); return;
+        }
+        if (reqForm.password.length < 4) { setError('La contraseña debe tener al menos 4 caracteres.'); return; }
+        if (reqForm.password !== reqForm.password2) { setError('Las contraseñas no coinciden.'); return; }
+        if (onRequestAdmin(reqForm)) {
+          setInfo('Tu solicitud fue enviada. El administrador principal la revisará. Cuando sea aceptada podrás entrar con tu teléfono o carnet y la contraseña que elegiste.');
+          setReqForm({ nombre: '', alias: '', telefono: '', carnet: '', password: '', password2: '', foto: '' });
+        }
+      };
+
+      return (
+        <div className="min-h-screen flex items-center justify-center p-4">
+          <div className="bg-white p-6 rounded-xl shadow-lg w-full max-w-md">
+            <h2 className="text-2xl font-bold text-center text-slate-800 mb-2">
+              {mode === 'login' && 'Iniciar Sesión'}
+              {mode === 'register' && 'Registro de Gestor'}
+              {mode === 'admin' && 'Acceso Administrador'}
+              {mode === 'requestAdmin' && 'Solicitar ser Administrador'}
+            </h2>
+            <p className="text-center text-xs text-slate-500 mb-5">Sistema de Gestión de Vales</p>
+            {error && <div className="mb-4 p-2 bg-red-50 border border-red-200 text-red-700 text-xs rounded">{error}</div>}
+            {info && <div className="mb-4 p-2 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded">{info}</div>}
+
+            {mode === 'login' && (
+              <div className="space-y-4">
+                <form onSubmit={handleLoginGestorSubmit} className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Teléfono *</label>
+                    <input type="tel" required className="w-full border p-2 rounded" value={loginTel}
+                      onChange={e => setLoginTel(e.target.value)} placeholder="Tu número de teléfono" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Contraseña *</label>
+                    <input type="password" required className="w-full border p-2 rounded" value={loginPass}
+                      onChange={e => setLoginPass(e.target.value)} placeholder="Tu contraseña" />
+                  </div>
+                  <button type="submit" className="w-full bg-indigo-600 text-white py-2 rounded-lg font-semibold hover:bg-indigo-700 transition">
+                    Entrar como Gestor
+                  </button>
+                </form>
+                <button type="button" onClick={() => { setMode('register'); setError(''); setInfo(''); }}
+                  className="w-full border border-indigo-300 text-indigo-700 py-2 rounded-lg text-sm font-medium hover:bg-indigo-50">
+                  ¿No tienes cuenta? Regístrate como Gestor
+                </button>
+                <hr className="border-slate-200" />
+                <button type="button" onClick={() => { setMode('admin'); setError(''); setInfo(''); }}
+                  className="w-full bg-slate-800 text-white py-2.5 rounded-lg font-semibold hover:bg-slate-900 transition text-sm">
+                  Entrar como Administrador
+                </button>
+                <button type="button" onClick={() => { setMode('requestAdmin'); setError(''); setInfo(''); }}
+                  className="w-full border border-slate-300 text-slate-700 py-2 rounded-lg text-sm font-medium hover:bg-slate-50">
+                  Solicitar ser Administrador
+                </button>
+              </div>
+            )}
+
+            {mode === 'admin' && (
+              <form onSubmit={handleLoginAdminSubmit} className="space-y-3">
+                <p className="text-xs text-slate-500 bg-slate-50 p-2 rounded">
+                  <strong>Admin principal:</strong> deja identificación vacía y usa la contraseña del sistema.<br/>
+                  <strong>Otros admins:</strong> teléfono o carnet + la contraseña de tu solicitud aceptada.
+                </p>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Teléfono o Carnet (admins secundarios)</label>
+                  <input type="text" className="w-full border p-2 rounded" value={adminId}
+                    onChange={e => setAdminId(e.target.value)} placeholder="Vacío = Admin Principal" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Contraseña *</label>
+                  <input type="password" required className="w-full border p-2 rounded" value={adminPass}
+                    onChange={e => setAdminPass(e.target.value)} placeholder="Contraseña" />
+                </div>
+                <button type="submit" className="w-full bg-slate-800 text-white py-2 rounded-lg font-semibold hover:bg-slate-900 transition">
+                  Entrar como Administrador
+                </button>
+                <button type="button" onClick={() => { setMode('login'); setError(''); setInfo(''); setAdminPass(''); setAdminId(''); }}
+                  className="w-full text-slate-500 text-xs py-2 hover:underline">← Volver</button>
+              </form>
+            )}
+
+            {mode === 'requestAdmin' && (
+              <form onSubmit={handleRequestAdminSubmit} className="space-y-3">
+                <p className="text-xs text-slate-500 bg-amber-50 border border-amber-200 p-2 rounded">
+                  Completa tus datos. El <strong>administrador principal</strong> verá tu solicitud y decidirá si te acepta.
+                </p>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Nombre Completo *</label>
+                  <input type="text" required className="w-full border p-2 rounded" value={reqForm.nombre}
+                    onChange={e => setReqForm({ ...reqForm, nombre: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Alias</label>
+                  <input type="text" className="w-full border p-2 rounded" value={reqForm.alias}
+                    onChange={e => setReqForm({ ...reqForm, alias: e.target.value })} placeholder="Opcional" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Teléfono *</label>
+                  <input type="tel" required className="w-full border p-2 rounded" value={reqForm.telefono}
+                    onChange={e => setReqForm({ ...reqForm, telefono: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Carnet de Identidad *</label>
+                  <input type="text" required className="w-full border p-2 rounded" value={reqForm.carnet}
+                    onChange={e => setReqForm({ ...reqForm, carnet: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Contraseña *</label>
+                  <input type="password" required minLength={4} className="w-full border p-2 rounded" value={reqForm.password}
+                    onChange={e => setReqForm({ ...reqForm, password: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Confirmar Contraseña *</label>
+                  <input type="password" required className="w-full border p-2 rounded" value={reqForm.password2}
+                    onChange={e => setReqForm({ ...reqForm, password2: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Foto (opcional)</label>
+                  <input type="file" accept="image/*" onChange={e => handleImageChange(e, setReqForm, reqForm)} className="w-full text-xs" />
+                </div>
+                <div className="pt-2 flex gap-2">
+                  <button type="button" onClick={() => { setMode('login'); setError(''); setInfo(''); }}
+                    className="w-1/2 border py-2 rounded text-slate-600 font-medium">Volver</button>
+                  <button type="submit" className="w-1/2 bg-slate-800 text-white py-2 rounded font-semibold hover:bg-slate-900">
+                    Enviar Solicitud
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {mode === 'register' && (
+              <form onSubmit={handleRegisterSubmit} className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Nombre Completo *</label>
+                  <input type="text" required className="w-full border p-2 rounded" value={form.nombre}
+                    onChange={e => setForm({ ...form, nombre: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Alias / Apodo</label>
+                  <input type="text" className="w-full border p-2 rounded" value={form.alias}
+                    onChange={e => setForm({ ...form, alias: e.target.value })} placeholder="Opcional" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Teléfono *</label>
+                  <input type="tel" required className="w-full border p-2 rounded" value={form.telefono}
+                    onChange={e => setForm({ ...form, telefono: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Carnet de Identidad *</label>
+                  <input type="text" required className="w-full border p-2 rounded" value={form.carnet}
+                    onChange={e => setForm({ ...form, carnet: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Tarjeta Bancaria *</label>
+                  <input type="text" required className="w-full border p-2 rounded" value={form.tarjeta}
+                    onChange={e => setForm({ ...form, tarjeta: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Edad</label>
+                  <input type="number" className="w-full border p-2 rounded" value={form.edad}
+                    onChange={e => setForm({ ...form, edad: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Contraseña * (mín. 4)</label>
+                  <input type="password" required minLength={4} className="w-full border p-2 rounded" value={form.password}
+                    onChange={e => setForm({ ...form, password: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Confirmar Contraseña *</label>
+                  <input type="password" required className="w-full border p-2 rounded" value={form.password2}
+                    onChange={e => setForm({ ...form, password2: e.target.value })} />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 mb-1">Foto de Perfil</label>
+                  <input type="file" accept="image/*" onChange={e => handleImageChange(e, setForm, form)} className="w-full text-xs" />
+                </div>
+                <div className="pt-3 flex gap-2">
+                  <button type="button" onClick={() => { setMode('login'); setError(''); setInfo(''); }}
+                    className="w-1/2 border py-2 rounded text-slate-600 font-medium">Volver</button>
+                  <button type="submit" className="w-1/2 bg-indigo-600 text-white py-2 rounded font-semibold hover:bg-indigo-700">
+                    Registrarse
+                  </button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // =====================================================
+    // PANEL GESTOR — formulario completo de vales
+    // =====================================================
+    function GestorDashboard({ user, vales, onAddVales }) {
+      const [cantidad, setCantidad] = useState(1);
+      const [filas, setFilas] = useState([valeVacio()]);
+
+      const handleCantidadChange = (n) => {
+        const num = Math.max(1, Math.min(10, parseInt(n) || 1));
+        setCantidad(num);
+        setFilas(prev => {
+          const nuevas = [...prev];
+          while (nuevas.length < num) nuevas.push(valeVacio());
+          return nuevas.slice(0, num);
+        });
+      };
+
+      const updateFila = (index, campo, valor) => {
+        setFilas(prev => {
+          const copy = [...prev];
+          copy[index] = { ...copy[index], [campo]: valor };
+          return copy;
+        });
+      };
+
+      const handleImageChange = (index, e) => {
+        const file = e.target.files[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onloadend = () => updateFila(index, 'imagen', reader.result);
+          reader.readAsDataURL(file);
+        }
+      };
+
+      const updateItem = (filaIdx, itemIdx, campo, valor) => {
+        setFilas(prev => {
+          const copy = [...prev];
+          const items = [...(copy[filaIdx].items || [])];
+          items[itemIdx] = { ...items[itemIdx], [campo]: valor };
+          copy[filaIdx] = { ...copy[filaIdx], items };
+          return copy;
+        });
+      };
+
+      const addItem = (filaIdx) => {
+        setFilas(prev => {
+          const copy = [...prev];
+          const items = [...(copy[filaIdx].items || []), { nombre: '', cantidad: '1', precio: '' }];
+          copy[filaIdx] = { ...copy[filaIdx], items };
+          return copy;
+        });
+      };
+
+      const removeItem = (filaIdx, itemIdx) => {
+        setFilas(prev => {
+          const copy = [...prev];
+          let items = [...(copy[filaIdx].items || [])];
+          if (items.length <= 1) {
+            items = [{ nombre: '', cantidad: '1', precio: '' }];
+          } else {
+            items.splice(itemIdx, 1);
+          }
+          copy[filaIdx] = { ...copy[filaIdx], items };
+          return copy;
+        });
+      };
+
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        for (let i = 0; i < filas.length; i++) {
+          const f = filas[i];
+          if (!f.nombreCliente || !f.telefonoCliente || !f.direccion || !f.municipio) {
+            alert(`Completa los campos obligatorios del Vale #${i + 1} (nombre, teléfono, dirección y municipio).`);
+            return;
+          }
+          const itemsValidos = (f.items || []).filter(it => it.nombre && it.nombre.trim());
+          if (itemsValidos.length === 0) {
+            alert(`Agrega al menos un producto en el Vale #${i + 1}.`);
+            return;
+          }
+          for (const it of itemsValidos) {
+            if (!it.precio || parseFloat(it.precio) < 0) {
+              alert(`Pon el precio de cada producto en el Vale #${i + 1}.`);
+              return;
+            }
+            if (!it.cantidad || parseFloat(it.cantidad) < 1) {
+              alert(`Pon la cantidad de cada producto en el Vale #${i + 1}.`);
+              return;
+            }
+          }
+
+          const total = calcularTotalVale(f);
+          if (total <= 0) {
+            alert(`El total del Vale #${i + 1} debe ser mayor a 0.`);
+            return;
+          }
+        }
+        onAddVales(filas);
+        setCantidad(1);
+        setFilas([valeVacio()]);
+      };
+
+
+      const totalPendiente = vales.filter(v => v.estado === 'pendiente').reduce((a, v) => a + (v.comisionMonto || 0), 0);
+      const totalPagado = vales.filter(v => v.estado === 'pagado').reduce((a, v) => a + (v.comisionMonto || 0), 0);
+
+      return (
+        <div className="space-y-6">
+          {/* Perfil */}
+          <div className="bg-white p-4 rounded-xl shadow-sm border flex items-center gap-4">
+            <img src={user.foto || "https://via.placeholder.com/80"} alt="Perfil" className="w-16 h-16 rounded-full object-cover border" />
+            <div>
+              <h3 className="font-bold text-lg text-slate-800">
+                {user.nombre}
+                {user.alias ? <span className="text-indigo-600 font-normal text-sm ml-1">({user.alias})</span> : null}
+              </h3>
+              <p className="text-xs text-slate-500">Tel: {user.telefono} | Edad: {user.edad || 'N/A'}</p>
+              <p className="text-xs text-slate-600 mt-0.5">Carnet: <span className="font-mono">{user.carnet}</span></p>
+              <p className="text-xs text-indigo-600 font-mono mt-0.5">Tarjeta: {user.tarjeta}</p>
+            </div>
+          </div>
+
+          {/* Formulario vales */}
+          <div className="bg-white p-4 rounded-xl shadow-sm border">
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="font-bold text-md text-slate-800">VALE DE VENTAS ✨</h4>
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-medium text-slate-600">Cantidad:</label>
+                <select value={cantidad} onChange={e => handleCantidadChange(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm font-semibold bg-slate-50">
+                  {[1,2,3,4,5,6,7,8,9,10].map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+            </div>
+
+            <form onSubmit={handleSubmit} className="space-y-6">
+              {filas.map((fila, idx) => (
+                <div key={idx} className="border-2 border-indigo-100 rounded-xl p-4 bg-slate-50 space-y-3">
+                  {cantidad > 1 && (
+                    <p className="text-xs font-bold text-indigo-600 border-b border-indigo-100 pb-2">Vale #{idx + 1}</p>
+                  )}
+
+                  {/* Fecha */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">🗓️ FECHA *</label>
+                    <input type="date" required className="w-full border p-2 rounded text-sm"
+                      value={fila.fecha} onChange={e => updateFila(idx, 'fecha', e.target.value)} />
+                  </div>
+
+                  {/* Nombre cliente */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">📝 NOMBRE DEL CLIENTE *</label>
+                    <input type="text" required className="w-full border p-2 rounded text-sm"
+                      value={fila.nombreCliente} onChange={e => updateFila(idx, 'nombreCliente', e.target.value)}
+                      placeholder="Nombre completo del cliente" />
+                  </div>
+
+                  {/* Teléfono cliente */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">📱 TELÉFONO *</label>
+                    <input type="tel" required className="w-full border p-2 rounded text-sm"
+                      value={fila.telefonoCliente} onChange={e => updateFila(idx, 'telefonoCliente', e.target.value)}
+                      placeholder="+53 5 XXXXXXX" />
+                  </div>
+
+                  {/* Dirección */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">📍 DIRECCIÓN *</label>
+                    <input type="text" required className="w-full border p-2 rounded text-sm"
+                      value={fila.direccion} onChange={e => updateFila(idx, 'direccion', e.target.value)}
+                      placeholder="Calle, número, entre calles..." />
+                  </div>
+
+                  {/* Municipio */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">MUNICIPIO *</label>
+                    <input type="text" required className="w-full border p-2 rounded text-sm"
+                      value={fila.municipio} onChange={e => updateFila(idx, 'municipio', e.target.value)}
+                      placeholder="Ej. Plaza, Centro Habana, Marianao..." />
+                  </div>
+
+                  {/* Punto de referencia (opcional) */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">📌 PUNTO DE REFERENCIA <span className="text-slate-400 font-normal">(opcional)</span></label>
+                    <input type="text" className="w-full border p-2 rounded text-sm"
+                      value={fila.puntoReferencia} onChange={e => updateFila(idx, 'puntoReferencia', e.target.value)}
+                      placeholder="Cerca de..., frente a..." />
+                  </div>
+
+                  {/* Productos: nombre + cantidad + precio | Enter agrega fila | + y − */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-2">♦️ PRODUCTOS A COMPRAR *</label>
+                    <div className="space-y-2">
+                      {/* Encabezados */}
+                      <div className="hidden sm:flex items-center gap-2 text-[10px] font-semibold text-slate-400 px-1">
+                        <span className="flex-grow">Producto</span>
+                        <span className="w-16 text-center">Cant.</span>
+                        <span className="w-24 text-center">Precio c/u</span>
+                        <span className="w-20 text-center">Subtotal</span>
+                        <span className="w-16"></span>
+                      </div>
+                      {(fila.items || []).map((item, itemIdx) => (
+                        <div key={itemIdx} className="flex flex-wrap sm:flex-nowrap items-center gap-2">
+                          <input
+                            type="text"
+                            className="flex-grow min-w-[120px] border p-2 rounded text-sm"
+                            placeholder="Nombre del producto"
+                            value={item.nombre}
+                            onChange={e => updateItem(idx, itemIdx, 'nombre', e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                addItem(idx);
+                              }
+                            }}
+                          />
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            className="w-16 border p-2 rounded text-sm text-center"
+                            placeholder="1"
+                            value={item.cantidad}
+                            onChange={e => updateItem(idx, itemIdx, 'cantidad', e.target.value)}
+                            title="Cantidad"
+                          />
+                          <div className="relative w-24 flex-shrink-0">
+                            <span className="absolute left-2 top-1/2 -translate-y-1/2 text-slate-400 text-sm">$</span>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              className="w-full border p-2 pl-5 rounded text-sm"
+                              placeholder="0.00"
+                              value={item.precio}
+                              onChange={e => updateItem(idx, itemIdx, 'precio', e.target.value)}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  addItem(idx);
+                                }
+                              }}
+                            />
+                          </div>
+                          <div className="w-20 text-center text-xs font-semibold text-slate-600">
+                            ${subtotalItem(item).toFixed(2)}
+                          </div>
+                          <div className="flex gap-1 flex-shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => addItem(idx)}
+                              className="w-8 h-8 rounded bg-emerald-100 text-emerald-700 font-bold text-lg hover:bg-emerald-200 leading-none"
+                              title="Agregar otro producto"
+                            >+</button>
+                            <button
+                              type="button"
+                              onClick={() => removeItem(idx, itemIdx)}
+                              className="w-8 h-8 rounded bg-red-100 text-red-600 font-bold text-lg hover:bg-red-200 leading-none"
+                              title="Quitar producto"
+                            >−</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-1">Pulsa Enter o el botón + para agregar otro producto</p>
+                  </div>
+
+
+                  {/* Mensajería + Total automático */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">🛵 COSTO DE LA MENSAJERÍA</label>
+                      <input type="number" step="0.01" min="0" className="w-full border p-2 rounded text-sm"
+                        value={fila.costoMensajeria} onChange={e => updateFila(idx, 'costoMensajeria', e.target.value)}
+                        placeholder="0.00" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-600 mb-1">💰 TOTAL A PAGAR (automático)</label>
+                      <div className="w-full border p-2 rounded text-sm font-bold bg-emerald-50 text-emerald-800 border-emerald-200">
+                        ${calcularTotalVale(fila).toFixed(2)}
+                      </div>
+                      <p className="text-[10px] text-slate-400 mt-0.5">Suma de productos + mensajería</p>
+                    </div>
+                  </div>
+
+
+                  {/* Gestor (solo lectura) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-indigo-50 p-2 rounded border border-indigo-100">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-indigo-700 mb-0.5">👤 GESTOR</label>
+                      <p className="text-sm font-medium text-slate-800">
+                        {user.nombre}{user.alias ? ` (${user.alias})` : ''}
+                      </p>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-indigo-700 mb-0.5">📲 NÚMERO DEL GESTOR</label>
+                      <p className="text-sm font-medium text-slate-800">{user.telefono}</p>
+                    </div>
+                  </div>
+
+                  {/* Foto opcional */}
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-600 mb-1">Comprobante / Foto (opcional)</label>
+                    <input type="file" accept="image/*" onChange={e => handleImageChange(idx, e)} className="w-full text-xs" />
+                  </div>
+                </div>
+              ))}
+
+              <button type="submit"
+                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-3 rounded-lg transition text-sm">
+                {cantidad === 1
+                  ? 'Enviar Vale y Notificar por WhatsApp'
+                  : `Enviar ${cantidad} Vales y Notificar por WhatsApp`}
+              </button>
+            </form>
+          </div>
+
+          {/* Resumen comisiones */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="bg-amber-50 border border-amber-200 p-3 rounded-lg text-center">
+              <span className="text-xs text-amber-700 font-medium block">Pendiente por Cobrar</span>
+              <span className="text-lg font-bold text-amber-800">${totalPendiente.toFixed(2)}</span>
+            </div>
+            <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-lg text-center">
+              <span className="text-xs text-emerald-700 font-medium block">Total Cobrado</span>
+              <span className="text-lg font-bold text-emerald-800">${totalPagado.toFixed(2)}</span>
+            </div>
+          </div>
+
+          {/* Lista de vales del gestor */}
+          <div className="bg-white p-4 rounded-xl shadow-sm border">
+            <h4 className="font-bold text-md text-slate-800 mb-3">Mis Vales Cargados</h4>
+            {vales.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-4">No has subido ningún vale aún.</p>
+            ) : (
+              <div className="space-y-3">
+                {vales.map(v => (
+                  <div key={v.id} className="border p-3 rounded-lg text-xs space-y-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-3 flex-grow">
+                        {v.imagen && <img src={v.imagen} className="w-12 h-12 object-cover rounded border flex-shrink-0" />}
+                        <div>
+                          <p className="font-bold text-slate-800">{v.nombreCliente || 'Sin nombre'}</p>
+                          <p className="text-slate-500">{v.telefonoCliente} · {v.municipio}</p>
+                          <p className="text-slate-600 mt-0.5 line-clamp-1">{v.productos}</p>
+                          <p className="text-indigo-600 font-semibold mt-1">
+                            Total: ${(v.totalPagar || v.monto || 0).toFixed(2)}
+                            <span className="text-slate-400 font-normal ml-2">
+                              · Comisión ({v.comisionPorcentaje}%): ${(v.comisionMonto || 0).toFixed(2)}
+                            </span>
+                          </p>
+                          <p className="text-[10px] text-slate-400">{formatearFecha(v.fecha) || v.fechaRegistro}</p>
+                        </div>
+                      </div>
+                      <span className={`px-2 py-1 rounded-full font-semibold text-[10px] flex-shrink-0 ${
+                        v.estado === 'pagado' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                      }`}>
+                        {v.estado === 'pagado' ? 'Pagado' : 'Pendiente'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // =====================================================
+    // PANEL ADMIN
+    // =====================================================
+    function AdminDashboard({
+      users, vales, adminTab, setAdminTab,
+      onToggleEstado, onDeleteVale, onDeleteGestor,
+      adminRequests, onResolverSolicitud, isPrincipal
+    }) {
+      const pendientes = adminRequests.filter(r => r.estado === 'pendiente');
+      const resueltas = adminRequests.filter(r => r.estado !== 'pendiente');
+      const [valeExpandido, setValeExpandido] = useState(null);
+
+      return (
+        <div className="space-y-4">
+          <div className="flex border-b flex-wrap">
+            <button onClick={() => setAdminTab('gestores')}
+              className={`py-2 px-4 font-semibold text-sm border-b-2 ${adminTab === 'gestores' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500'}`}>
+              Gestores ({users.length})
+            </button>
+            <button onClick={() => setAdminTab('vales')}
+              className={`py-2 px-4 font-semibold text-sm border-b-2 ${adminTab === 'vales' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500'}`}>
+              Todos los Vales ({vales.length})
+            </button>
+            {isPrincipal && (
+              <button onClick={() => setAdminTab('solicitudes')}
+                className={`py-2 px-4 font-semibold text-sm border-b-2 ${adminTab === 'solicitudes' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500'}`}>
+                Solicitudes Admin
+                {pendientes.length > 0 && (
+                  <span className="ml-1 bg-red-500 text-white text-[10px] px-1.5 py-0.5 rounded-full">{pendientes.length}</span>
+                )}
+              </button>
+            )}
+          </div>
+
+          {/* GESTORES */}
+          {adminTab === 'gestores' && (
+            <div className="space-y-4">
+              {users.length === 0 ? (
+                <p className="text-xs text-slate-400 text-center py-6">No hay gestores registrados todavía.</p>
+              ) : (
+                users.map(u => {
+                  const valesGestor = vales.filter(v => v.gestorId === u.id);
+                  const pendiente = valesGestor.filter(v => v.estado === 'pendiente').reduce((a, v) => a + (v.comisionMonto || 0), 0);
+                  return (
+                    <div key={u.id} className="bg-white p-4 rounded-xl shadow-sm border space-y-3">
+                      <div className="flex items-start gap-3">
+                        <img src={u.foto || "https://via.placeholder.com/60"} className="w-12 h-12 rounded-full object-cover border" />
+                        <div className="flex-grow">
+                          <h4 className="font-bold text-slate-800">
+                            {u.nombre}
+                            {u.alias ? <span className="text-indigo-600 font-normal text-sm ml-1">({u.alias})</span> : null}
+                          </h4>
+                          <p className="text-xs text-slate-500">Tel: {u.telefono}</p>
+                          <p className="text-xs text-slate-600">Carnet: <span className="font-mono">{u.carnet}</span></p>
+                          <p className="text-xs text-slate-500">Tarjeta: <span className="font-mono text-slate-700">{u.tarjeta}</span></p>
+                        </div>
+                        <div className="text-right flex flex-col items-end gap-2">
+                          <div>
+                            <span className="text-[10px] text-slate-400 block">A Pagar</span>
+                            <span className="text-md font-bold text-amber-600">${pendiente.toFixed(2)}</span>
+                          </div>
+                          <button onClick={() => onDeleteGestor(u.id, u.nombre)}
+                            className="text-[10px] text-red-600 border border-red-300 hover:bg-red-50 px-2 py-1 rounded font-medium">
+                            Eliminar gestor
+                          </button>
+                        </div>
+                      </div>
+                      {valesGestor.length > 0 && (
+                        <div className="bg-slate-50 p-2 rounded-lg space-y-2">
+                          <p className="text-[11px] font-semibold text-slate-500">Historial de vales ({valesGestor.length}):</p>
+                          {valesGestor.map(v => (
+                            <div key={v.id} className="bg-white p-2 rounded border flex items-center justify-between text-xs">
+                              <div>
+                                <span className="font-medium">{v.nombreCliente || 'Cliente'}</span>
+                                <span className="text-slate-400 ml-2">${(v.totalPagar || v.monto || 0).toFixed(2)}</span>
+                                <span className="text-slate-400 ml-1">({v.comisionPorcentaje}% = ${(v.comisionMonto || 0).toFixed(2)})</span>
+                              </div>
+                              <button onClick={() => onToggleEstado(v.id)}
+                                className={`px-2 py-1 rounded text-[10px] font-bold ${
+                                  v.estado === 'pagado' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                                }`}>
+                                {v.estado === 'pagado' ? 'PAGADO (Cambiar)' : 'MARCAR PAGADO'}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+
+          {/* TODOS LOS VALES — detalle completo */}
+          {adminTab === 'vales' && (
+            <div className="space-y-3">
+              {vales.length === 0 ? (
+                <div className="bg-white rounded-xl shadow-sm border p-6">
+                  <p className="text-xs text-slate-400 text-center">No hay vales registrados.</p>
+                </div>
+              ) : (
+                vales.map(v => (
+                  <div key={v.id} className="bg-white rounded-xl shadow-sm border overflow-hidden">
+                    <div className="p-3 flex items-center justify-between text-xs hover:bg-slate-50 cursor-pointer"
+                      onClick={() => setValeExpandido(valeExpandido === v.id ? null : v.id)}>
+                      <div className="flex items-center gap-3">
+                        {v.imagen ? (
+                          <img src={v.imagen} className="w-12 h-12 object-cover rounded border" />
+                        ) : (
+                          <div className="w-12 h-12 bg-slate-100 rounded flex items-center justify-center text-[10px] text-slate-400">Sin foto</div>
+                        )}
+                        <div>
+                          <p className="font-bold text-slate-800">
+                            {v.nombreCliente || 'Sin cliente'}
+                            <span className="text-slate-400 font-normal ml-1">· {v.municipio}</span>
+                          </p>
+                          <p className="text-slate-600">
+                            Gestor: {v.gestorNombre}
+                            {v.gestorAlias ? ` (${v.gestorAlias})` : ''}
+                          </p>
+                          <p className="text-indigo-600 font-semibold">
+                            Total: ${(v.totalPagar || v.monto || 0).toFixed(2)}
+                            <span className="text-slate-400 font-normal ml-2">
+                              Comisión ({v.comisionPorcentaje}%): ${(v.comisionMonto || 0).toFixed(2)}
+                            </span>
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-2 items-end" onClick={e => e.stopPropagation()}>
+                        <button onClick={() => onToggleEstado(v.id)}
+                          className={`px-3 py-1 rounded text-[10px] font-bold ${
+                            v.estado === 'pagado' ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                          }`}>
+                          {v.estado === 'pagado' ? 'PAGADO' : 'PENDIENTE'}
+                        </button>
+                        <button onClick={() => onDeleteVale(v.id)} className="text-[10px] text-red-500 hover:underline">Eliminar</button>
+                      </div>
+                    </div>
+
+                    {/* Detalle expandido — formato ficha */}
+                    {valeExpandido === v.id && (
+                      <div className="border-t bg-slate-50 p-4 text-xs space-y-1.5 font-mono">
+                        <p className="font-sans font-bold text-sm text-slate-800 mb-2">VALE DE VENTAS ✨</p>
+                        <p>🗓️ FECHA: {formatearFecha(v.fecha) || v.fechaRegistro || '—'}</p>
+                        <p>📝 NOMBRE DEL CLIENTE: {v.nombreCliente || '—'}</p>
+                        <p>📱 TELÉFONO: {v.telefonoCliente || '—'}</p>
+                        <p>📍 DIRECCIÓN: {v.direccion || '—'}</p>
+                        <p>      MUNICIPIO: {v.municipio || '—'}</p>
+                        {v.puntoReferencia && <p>📌 PUNTO DE REFERENCIA: {v.puntoReferencia}</p>}
+                        <p>♦️ PRODUCTOS A COMPRAR:</p>
+                        {(v.items && v.items.length > 0) ? (
+                          v.items.map((it, i) => {
+                            const sub = (it.cantidad || 1) * (it.precio || 0);
+                            return (
+                              <p key={i} className="pl-3">
+                                • {it.nombre} x{it.cantidad || 1} — ${Number(it.precio).toFixed(2)} c/u = ${sub.toFixed(2)}
+                              </p>
+                            );
+                          })
+                        ) : (
+                          <p className="pl-3">{v.productos || '—'}</p>
+                        )}
+
+                        <p>🛵 COSTO DE LA MENSAJERÍA: ${(v.costoMensajeria || 0).toFixed(2)}</p>
+                        <p>💰 TOTAL A PAGAR: ${(v.totalPagar || v.monto || 0).toFixed(2)}</p>
+
+                        <p>👤 GESTOR: {v.gestorNombre}{v.gestorAlias ? ` (${v.gestorAlias})` : ''}</p>
+                        <p>📲 NÚMERO DEL GESTOR: {v.gestorTelefono || '—'}</p>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {/* SOLICITUDES ADMIN */}
+          {adminTab === 'solicitudes' && isPrincipal && (
+            <div className="space-y-4">
+              <h3 className="font-bold text-slate-800">Solicitudes de Administrador</h3>
+              {pendientes.length === 0 && resueltas.length === 0 && (
+                <p className="text-xs text-slate-400 text-center py-6">No hay solicitudes todavía.</p>
+              )}
+              {pendientes.length > 0 && (
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold text-amber-700">Pendientes de revisión ({pendientes.length})</p>
+                  {pendientes.map(r => (
+                    <div key={r.id} className="bg-white p-4 rounded-xl shadow-sm border border-amber-200 space-y-2">
+                      <div className="flex items-start gap-3">
+                        <img src={r.foto || "https://via.placeholder.com/60"} className="w-12 h-12 rounded-full object-cover border" />
+                        <div className="flex-grow">
+                          <h4 className="font-bold text-slate-800">
+                            {r.nombre}
+                            {r.alias ? <span className="text-indigo-600 font-normal text-sm ml-1">({r.alias})</span> : null}
+                          </h4>
+                          <p className="text-xs text-slate-500">Tel: {r.telefono}</p>
+                          <p className="text-xs text-slate-600">Carnet: <span className="font-mono">{r.carnet}</span></p>
+                          <p className="text-[10px] text-slate-400">Solicitado: {r.fecha}</p>
+                        </div>
+                      </div>
+                      <div className="flex gap-2 pt-1">
+                        <button onClick={() => onResolverSolicitud(r.id, 'aceptado')}
+                          className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold py-2 rounded">Aceptar</button>
+                        <button onClick={() => onResolverSolicitud(r.id, 'rechazado')}
+                          className="flex-1 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold py-2 rounded">Rechazar</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {resueltas.length > 0 && (
+                <div className="space-y-2 pt-2">
+                  <p className="text-xs font-semibold text-slate-500">Historial</p>
+                  {resueltas.map(r => (
+                    <div key={r.id} className="bg-white p-3 rounded-lg border text-xs flex items-center justify-between">
+                      <div>
+                        <span className="font-semibold">{r.nombre}</span>
+                        {r.alias ? ` (${r.alias})` : ''}
+                        <span className="text-slate-400 ml-2">· Carnet: {r.carnet}</span>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded-full font-semibold text-[10px] ${
+                        r.estado === 'aceptado' ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
+                      }`}>
+                        {r.estado === 'aceptado' ? 'Aceptado' : 'Rechazado'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
