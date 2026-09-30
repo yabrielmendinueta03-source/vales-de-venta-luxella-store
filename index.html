@@ -9,8 +9,7 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.14.0/firebase-app-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore-compat.js"></script>
+  
   <style>
     #loading {
       min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -31,19 +30,14 @@
   </div>
   <div id="root" style="display:none;"></div>
 
-  <script type="text/babel" data-presets="react">
-    const { useState, useEffect } = React;
-
-    // =====================================================
-    // CONFIGURACIÓN — COMPLETA ESTOS DATOS
-    // =====================================================
-    // 1) https://console.firebase.google.com → crear proyecto
-    // 2) Agregar app Web → copiar firebaseConfig
-    // 3) Build → Firestore → Crear base de datos → Modo prueba
-    // 4) Pegar la config abajo
-
-    const ADMIN_WHATSAPP = "5355360008";
-    const ADMIN_PASSWORD = "admin123";
+  <!-- Carga Modular de Firebase con Polyfill compat y forzado de Long-Polling -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-app.js";
+    import { 
+      initializeFirestore, 
+      experimentalLongPollingOptions,
+      collection, onSnapshot, getDocs, getDoc, doc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, writeBatch, serverTimestamp 
+    } from "https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore.js";
 
     const firebaseConfig = {
       apiKey: "AIzaSyBP51QQoRUu12fZZC_afoK_PamJbayxWvA",
@@ -55,22 +49,28 @@
       measurementId: "G-XBGW6ZCW0Z"
     };
 
-    // =====================================================
+    const app = initializeApp(firebaseConfig);
+    // FORZAR LONG POLLING PARA EVITAR ERRORES CORS / 403 EN LOCAL FILE Y LOCALHOST
+    const db = initializeFirestore(app, {
+      experimentalForceLongPolling: true
+    });
 
-    let db = null;
-    let firebaseListo = false;
-    let firebaseError = null;
-    try {
-      if (firebaseConfig.apiKey && firebaseConfig.apiKey !== "TU_API_KEY") {
-        firebase.initializeApp(firebaseConfig);
-        db = firebase.firestore();
-        firebaseListo = true;
-      } else {
-        firebaseError = "CONFIG";
-      }
-    } catch (e) {
-      firebaseError = e.message || String(e);
-    }
+    // Adaptador de compatibilidad para el código React existente
+    window.dbInstance = db;
+    window.fbUtils = {
+      collection: (path) => collection(db, path),
+      doc: (path, ...ids) => doc(db, path, ...ids),
+      onSnapshot, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, writeBatch, serverTimestamp
+    };
+    window.firebaseListo = true;
+    window.dispatchEvent(new Event('firebase-ready'));
+  </script>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect } = React;
+
+    const ADMIN_WHATSAPP = "5355360008";
+    const ADMIN_PASSWORD = "admin123";
 
     function simpleHash(str) {
       let hash = 0;
@@ -103,34 +103,6 @@
       return suma + (parseFloat(fila.costoMensajeria) || 0);
     }
 
-    function ConfigScreen() {
-      return (
-        <div className="min-h-screen flex items-center justify-center p-4 bg-slate-100">
-          <div className="bg-white p-6 rounded-xl shadow-lg max-w-lg w-full space-y-4">
-            <h2 className="text-xl font-bold text-slate-800">Configurar Firebase (una sola vez)</h2>
-            <p className="text-sm text-slate-600">
-              Así el admin en la PC y los gestores en el móvil ven los mismos datos en tiempo real.
-            </p>
-            <ol className="text-sm text-slate-700 space-y-2 list-decimal list-inside">
-              <li>Entra a <a className="text-indigo-600 underline" href="https://console.firebase.google.com" target="_blank" rel="noreferrer">console.firebase.google.com</a></li>
-              <li>Crea un proyecto (ej. vales-gestores)</li>
-              <li>Icono Web (&lt;/&gt;) → registra la app → copia <code className="bg-slate-100 px-1">firebaseConfig</code></li>
-              <li><strong>Build → Firestore Database → Crear → Modo de prueba</strong></li>
-              <li>Abre este HTML con Bloc de notas y pega la config donde dice firebaseConfig</li>
-              <li>Guarda, súbelo de nuevo (Netlify) y ábrelo en PC y móvil</li>
-            </ol>
-            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2 rounded">
-              En Firestore → Reglas (para pruebas):<br/>
-              <code className="text-[11px]">rules_version = '2'; service cloud.firestore {"{"} match /databases/{"{database}"}/documents {"{"} match /{"{document=**}"} {"{"} allow read, write: if true; {"}"} {"}"} {"}"}</code>
-            </p>
-            {firebaseError && firebaseError !== "CONFIG" && (
-              <p className="text-xs text-red-600">Error: {firebaseError}</p>
-            )}
-          </div>
-        </div>
-      );
-    }
-
     function App() {
       const [currentUser, setCurrentUser] = useState(null);
       const [users, setUsers] = useState([]);
@@ -139,19 +111,29 @@
       const [adminTab, setAdminTab] = useState("gestores");
       const [cargando, setCargando] = useState(true);
       const [errorSync, setErrorSync] = useState("");
+      const [ready, setReady] = useState(window.firebaseListo || false);
+
+      useEffect(() => {
+        const handleReady = () => setReady(true);
+        window.addEventListener('firebase-ready', handleReady);
+        return () => window.removeEventListener('firebase-ready', handleReady);
+      }, []);
 
       useEffect(() => {
         const saved = localStorage.getItem("app_session_user");
         if (saved) { try { setCurrentUser(JSON.parse(saved)); } catch (e) {} }
       }, []);
+
       useEffect(() => {
         if (currentUser) localStorage.setItem("app_session_user", JSON.stringify(currentUser));
         else localStorage.removeItem("app_session_user");
       }, [currentUser]);
 
       useEffect(() => {
-        if (!firebaseListo || !db) { setCargando(false); return; }
-        const u1 = db.collection("users").onSnapshot(
+        if (!ready) return;
+        const { collection, onSnapshot, query, orderBy } = window.fbUtils;
+        
+        const u1 = onSnapshot(collection("users"),
           (snap) => {
             const list = [];
             snap.forEach(d => list.push({ id: d.id, ...d.data() }));
@@ -160,7 +142,8 @@
           },
           (err) => { setErrorSync(err.message); setCargando(false); }
         );
-        const u2 = db.collection("vales").orderBy("createdAt", "desc").onSnapshot(
+
+        const u2 = onSnapshot(query(collection("vales"), orderBy("createdAt", "desc")),
           (snap) => {
             const list = [];
             snap.forEach(d => list.push({ id: d.id, ...d.data() }));
@@ -168,7 +151,8 @@
           },
           (err) => setErrorSync(err.message)
         );
-        const u3 = db.collection("admin_requests").orderBy("createdAt", "desc").onSnapshot(
+
+        const u3 = onSnapshot(query(collection("admin_requests"), orderBy("createdAt", "desc")),
           (snap) => {
             const list = [];
             snap.forEach(d => list.push({ id: d.id, ...d.data() }));
@@ -176,21 +160,23 @@
           },
           () => {}
         );
+
         return () => { u1(); u2(); u3(); };
-      }, []);
+      }, [ready]);
 
       const handleRegister = async (formData) => {
         try {
-          const t = await db.collection("users").where("telefono", "==", formData.telefono).get();
+          const { collection, query, where, getDocs, addDoc, serverTimestamp } = window.fbUtils;
+          const t = await getDocs(query(collection("users"), where("telefono", "==", formData.telefono)));
           if (!t.empty) { alert("Ya existe un gestor con ese teléfono."); return false; }
-          const c = await db.collection("users").where("carnet", "==", formData.carnet).get();
+          const c = await getDocs(query(collection("users"), where("carnet", "==", formData.carnet)));
           if (!c.empty) { alert("Ya existe un gestor con ese carnet."); return false; }
-          await db.collection("users").add({
+          await addDoc(collection("users"), {
             role: "gestor", nombre: formData.nombre, alias: formData.alias || "",
             telefono: formData.telefono, carnet: formData.carnet, tarjeta: formData.tarjeta,
             edad: formData.edad || "", foto: formData.foto || "",
             passwordHash: simpleHash(formData.password),
-            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            createdAt: serverTimestamp()
           });
           return true;
         } catch (e) { alert("Error: " + e.message); return false; }
@@ -198,7 +184,8 @@
 
       const handleLoginGestor = async (telefono, password) => {
         try {
-          const snap = await db.collection("users").where("telefono", "==", telefono).where("role", "==", "gestor").get();
+          const { collection, query, where, getDocs } = window.fbUtils;
+          const snap = await getDocs(query(collection("users"), where("telefono", "==", telefono), where("role", "==", "gestor")));
           if (snap.empty) { alert("Teléfono no registrado."); return false; }
           const doc = snap.docs[0];
           const data = doc.data();
@@ -217,8 +204,9 @@
           return { ok: true };
         }
         try {
-          let snap = await db.collection("admin_requests").where("telefono", "==", identificador).where("estado", "==", "aceptado").get();
-          if (snap.empty) snap = await db.collection("admin_requests").where("carnet", "==", identificador).where("estado", "==", "aceptado").get();
+          const { collection, query, where, getDocs } = window.fbUtils;
+          let snap = await getDocs(query(collection("admin_requests"), where("telefono", "==", identificador), where("estado", "==", "aceptado")));
+          if (snap.empty) snap = await getDocs(query(collection("admin_requests"), where("carnet", "==", identificador), where("estado", "==", "aceptado")));
           if (!snap.empty) {
             const data = snap.docs[0].data();
             if (data.passwordHash !== simpleHash(password)) return { ok: false, msg: "Contraseña incorrecta." };
@@ -228,8 +216,8 @@
             });
             return { ok: true };
           }
-          let pend = await db.collection("admin_requests").where("telefono", "==", identificador).where("estado", "==", "pendiente").get();
-          if (pend.empty) pend = await db.collection("admin_requests").where("carnet", "==", identificador).where("estado", "==", "pendiente").get();
+          let pend = await getDocs(query(collection("admin_requests"), where("telefono", "==", identificador), where("estado", "==", "pendiente")));
+          if (pend.empty) pend = await getDocs(query(collection("admin_requests"), where("carnet", "==", identificador), where("estado", "==", "pendiente")));
           if (!pend.empty) return { ok: false, msg: "Tu solicitud está siendo procesada." };
           return { ok: false, msg: "Credenciales no válidas." };
         } catch (e) { return { ok: false, msg: e.message }; }
@@ -237,31 +225,36 @@
 
       const handleRequestAdmin = async (formData) => {
         try {
-          const q = await db.collection("admin_requests").where("telefono", "==", formData.telefono).get();
+          const { collection, query, where, getDocs, addDoc, serverTimestamp } = window.fbUtils;
+          const q = await getDocs(query(collection("admin_requests"), where("telefono", "==", formData.telefono)));
           if (q.docs.some(d => ["pendiente","aceptado"].includes(d.data().estado))) {
             alert("Ya hay una solicitud con ese teléfono."); return false;
           }
-          await db.collection("admin_requests").add({
+          await addDoc(collection("admin_requests"), {
             nombre: formData.nombre, alias: formData.alias || "", telefono: formData.telefono,
             carnet: formData.carnet, passwordHash: simpleHash(formData.password), foto: formData.foto || "",
             estado: "pendiente", fecha: new Date().toLocaleDateString("es-ES"),
-            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+            createdAt: serverTimestamp()
           });
           return true;
         } catch (e) { alert("Error: " + e.message); return false; }
       };
 
       const handleResolverSolicitud = async (id, decision) => {
-        try { await db.collection("admin_requests").doc(id).update({ estado: decision }); }
-        catch (e) { alert("Error: " + e.message); }
+        try { 
+          const { doc, updateDoc } = window.fbUtils;
+          await updateDoc(doc("admin_requests", id), { estado: decision }); 
+        } catch (e) { alert("Error: " + e.message); }
       };
 
       const handleLogout = () => setCurrentUser(null);
 
       const handleAddVales = async (listaVales) => {
         try {
-          const batch = db.batch();
+          const { writeBatch, collection, doc, dbInstance, serverTimestamp } = window.fbUtils;
+          const batch = writeBatch(dbInstance);
           const nuevos = [];
+
           listaVales.forEach((item) => {
             const itemsLimpios = (item.items || []).filter(it => it.nombre && it.nombre.trim())
               .map(it => ({ nombre: it.nombre.trim(), cantidad: parseFloat(it.cantidad) || 1, precio: parseFloat(it.precio) || 0 }));
@@ -270,7 +263,7 @@
             const totalNum = suma + costoMensajeria;
             const comisionPorcentaje = totalNum >= 10000 ? 15 : 10;
             const comisionMonto = (totalNum * comisionPorcentaje) / 100;
-            const ref = db.collection("vales").doc();
+            const ref = doc(collection("vales"));
             const data = {
               gestorId: currentUser.id, gestorNombre: currentUser.nombre,
               gestorAlias: currentUser.alias || "", gestorTelefono: currentUser.telefono,
@@ -281,7 +274,7 @@
               costoMensajeria, totalPagar: totalNum, monto: totalNum,
               comisionPorcentaje, comisionMonto, imagen: item.imagen || "",
               estado: "pendiente", fechaRegistro: new Date().toLocaleDateString("es-ES"),
-              createdAt: firebase.firestore.FieldValue.serverTimestamp()
+              createdAt: serverTimestamp()
             };
             batch.set(ref, data);
             nuevos.push({ id: ref.id, ...data });
@@ -314,35 +307,39 @@
 
       const handleToggleValeEstado = async (valeId, estadoActual) => {
         try {
-          await db.collection("vales").doc(valeId).update({ estado: estadoActual === "pendiente" ? "pagado" : "pendiente" });
+          const { doc, updateDoc } = window.fbUtils;
+          await updateDoc(doc("vales", valeId), { estado: estadoActual === "pendiente" ? "pagado" : "pendiente" });
         } catch (e) { alert("Error: " + e.message); }
       };
 
       const handleDeleteVale = async (valeId) => {
         if (!confirm("¿Eliminar este vale?")) return;
-        try { await db.collection("vales").doc(valeId).delete(); }
-        catch (e) { alert("Error: " + e.message); }
+        try { 
+          const { doc, deleteDoc } = window.fbUtils;
+          await deleteDoc(doc("vales", valeId)); 
+        } catch (e) { alert("Error: " + e.message); }
       };
 
       const handleDeleteGestor = async (gestorId, gestorNombre) => {
         const n = vales.filter(v => v.gestorId === gestorId).length;
         if (!confirm(n > 0 ? '¿Eliminar gestor "' + gestorNombre + '" y sus ' + n + ' vales?' : '¿Eliminar gestor "' + gestorNombre + '"?')) return;
         try {
-          const batch = db.batch();
-          batch.delete(db.collection("users").doc(gestorId));
-          vales.filter(v => v.gestorId === gestorId).forEach(v => batch.delete(db.collection("vales").doc(v.id)));
+          const { writeBatch, doc, dbInstance } = window.fbUtils;
+          const batch = writeBatch(dbInstance);
+          batch.delete(doc("users", gestorId));
+          vales.filter(v => v.gestorId === gestorId).forEach(v => batch.delete(doc("vales", v.id)));
           await batch.commit();
         } catch (e) { alert("Error: " + e.message); }
       };
 
-      if (!firebaseListo) return <ConfigScreen />;
-      if (cargando) {
+      if (cargando || !ready) {
         return (
           <div className="min-h-screen flex items-center justify-center">
             <p className="text-sm text-slate-600">Sincronizando datos...</p>
           </div>
         );
       }
+
       if (!currentUser) {
         return (
           <LoginScreen
@@ -823,3 +820,4 @@
   </script>
 </body>
 </html>
+
